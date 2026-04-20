@@ -1,15 +1,18 @@
 """
-CareerVibe — 求职助手（Streamlit）
-简历：PDF / .docx；JD：PDF 或文本。深度分析 + Plotly 五维雷达图。
+CareerVibe — 深度分析版（Streamlit，非流式）
+小 JSON 拉取雷达五维；三段正文各自 chat_completion 完成后一次性展示。
+主区（三 Tab 下方）「面试预测」「面试复盘」为独立非流式任务，仅按钮触发。
 """
 
-from __future__ import annotations
+from __future__ import annotations 
 
-import html
 import io
 import json
+import math
 import os
+import traceback
 from pathlib import Path
+from typing import Any
 
 import pdfplumber
 import plotly.graph_objects as go
@@ -22,94 +25,21 @@ _PROJECT_ROOT = Path(__file__).resolve().parent
 load_dotenv(_PROJECT_ROOT / ".env")
 load_dotenv()
 
-RADAR_LABELS = ["硬技能", "软实力", "行业相关度", "经验资历", "潜力"]
+RADAR_LABELS_CN = ["硬技能", "软实力", "行业匹配", "经验资历", "发展潜力"]
+DEFAULT_RADAR_SCORES = [80, 80, 80, 80, 80]
 
-SYSTEM_HEADHUNTER = """你是具备全球化视野的专业全行业资深猎头顾问，熟悉互联网、金融、数据分析、产品与技术、运营与增长、创意与内容、专业服务、制造与供应链等多赛道与跨文化职场环境。
-请先根据用户提供的岗位 JD 自行识别其所属细分行业与职能类型，不要默认局限于某一垂直；所有判断须与 JD 实际语境一致。
-你的风格：像顶级咨询公司顾问撰写客户报告——结构清晰、论证充分、可执行；拒绝空话与过度精简；若材料不足须明确假设边界。"""
+SYSTEM_HEADHUNTER = """你是资深公关与传播行业猎头顾问，中文输出，专业、直接、可执行。
+严格依据简历与 JD；证据不足时用一句话写清假设。"""
+
+SYSTEM_INTERVIEW_MASTER = """你扮演 MBB（麦肯锡/贝恩/BCG）或 Google/Meta 等级别企业中的资深 HR Director / Hiring Bar Raiser：
+面试语言为中文；风格冷静、结构化、高标准；善于基于候选人「真实履历细节」设计追问与示范回答。
+输出必须可扫读：标题层级清晰，题与题之间用水平分割线（Markdown ---）分隔。
+用户要求 **恰好 10 道** Masterclass 级题目：每题「满分范例回答」必须写深写透；**必须完整输出 Q1–Q10，不得中途省略或烂尾。**"""
 
 
-def inject_report_css() -> None:
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stAppViewContainer"] {
-            background: #f8f9fa !important;
-        }
-        .block-container {
-            padding-top: 1.25rem;
-            padding-bottom: 2.5rem;
-            max-width: 1100px;
-        }
-        .hero-title {
-            font-size: 2.15rem;
-            font-weight: 700;
-            letter-spacing: -0.03em;
-            background: linear-gradient(105deg, #0f172a 0%, #1e293b 40%, #334155 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            margin-bottom: 0.25rem;
-        }
-        .hero-sub {
-            color: #64748b;
-            font-size: 0.95rem;
-            margin-bottom: 1.25rem;
-        }
-        .report-card {
-            background: #ffffff;
-            border-radius: 12px;
-            box-shadow: 0 4px 24px rgba(15, 23, 42, 0.08);
-            border: 1px solid rgba(30, 41, 59, 0.08);
-            padding: 1.35rem 1.5rem;
-            margin: 1rem 0;
-        }
-        .glass-panel {
-            background: rgba(255, 255, 255, 0.92);
-            backdrop-filter: blur(8px);
-            border-radius: 12px;
-            box-shadow: 0 8px 32px rgba(30, 41, 59, 0.1);
-            border: 1px solid rgba(255, 255, 255, 0.8);
-            padding: 1rem 1.25rem;
-            margin: 0.75rem 0;
-        }
-        .career-path-card {
-            border: 2px solid #c4b5fd;
-            border-radius: 14px;
-            padding: 1.35rem 1.5rem;
-            margin: 1rem 0;
-            background: linear-gradient(145deg, rgba(245, 243, 255, 0.95) 0%, #ffffff 55%);
-            box-shadow: 0 6px 28px rgba(139, 92, 246, 0.12);
-        }
-        .career-path-card h3 {
-            color: #5b21b6;
-            margin-top: 0;
-            font-size: 1.15rem;
-        }
-        [data-testid="stSidebar"] {
-            background: #f1f5f9 !important;
-            border-right: 1px solid #e2e8f0 !important;
-        }
-        [data-testid="stSidebar"] .stMarkdown { color: #475569; }
-        .stTabs [data-baseweb="tab-list"] { gap: 10px; background: transparent; border-bottom: 1px solid #e2e8f0; }
-        .stTabs [data-baseweb="tab"] {
-            background: #fff;
-            border: 1px solid #e2e8f0 !important;
-            border-radius: 10px 10px 0 0 !important;
-            color: #64748b;
-            font-weight: 500;
-        }
-        .stTabs [aria-selected="true"] {
-            background: #1e293b !important;
-            border-color: #1e293b !important;
-            color: #f8fafc !important;
-        }
-        h2, h3 { color: #1e293b !important; font-weight: 600 !important; }
-        hr.soft { border: none; border-top: 1px solid #e2e8f0; margin: 1.5rem 0; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+def inject_deep_css() -> None:
+    """Custom theme disabled — default Streamlit UI (sidebar debugging)."""
+    pass
 
 
 def extract_pdf_text(uploaded_file) -> str:
@@ -180,9 +110,9 @@ def chat_completion(
     user: str,
     *,
     json_mode: bool = False,
-    max_tokens: int = 4096,
+    max_tokens: int = 2048,
 ) -> str:
-    kwargs: dict = {
+    kwargs: dict[str, Any] = {
         "model": get_model(),
         "messages": [
             {"role": "system", "content": system},
@@ -197,10 +127,68 @@ def chat_completion(
     return (resp.choices[0].message.content or "").strip()
 
 
-def build_radar_figure(scores: dict) -> go.Figure:
-    values = [int(scores.get(k, 0) or 0) for k in RADAR_LABELS]
-    values = [max(0, min(100, v)) for v in values]
-    theta = RADAR_LABELS + [RADAR_LABELS[0]]
+def clamp_int_score(v: object, fallback: int) -> int:
+    try:
+        x = int(float(v))
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(x):
+        return fallback
+    return max(0, min(100, x))
+
+
+def normalize_radar_list(raw: object) -> list[int] | None:
+    if not isinstance(raw, list) or len(raw) < 5:
+        return None
+    out: list[int] = []
+    for i in range(5):
+        out.append(clamp_int_score(raw[i], DEFAULT_RADAR_SCORES[i]))
+    return out
+
+
+def fetch_radar_scores_safe(
+    client: OpenAI, resume: str, jd: str
+) -> tuple[list[int], str | None]:
+    """仅请求雷达 JSON；失败返回默认 80×5 与提示文案。"""
+    user = f"""仅输出合法 JSON（不要 Markdown 围栏），且 **只能** 包含一个键 radar_scores：
+{{ "radar_scores": [a,b,c,d,e] }}
+五个整数 0-100，顺序固定为：{", ".join(RADAR_LABELS_CN)}。
+
+--- 简历 ---
+{resume[:8000]}
+
+--- JD ---
+{jd[:8000]}
+"""
+    try:
+        raw = chat_completion(
+            client, SYSTEM_HEADHUNTER, user, json_mode=True, max_tokens=400
+        )
+        data = json.loads(raw.strip())
+        if not isinstance(data, dict):
+            return list(DEFAULT_RADAR_SCORES), "雷达分数解析失败，已使用默认值 80。"
+        arr = normalize_radar_list(data.get("radar_scores"))
+        if arr is None:
+            return list(DEFAULT_RADAR_SCORES), "雷达分数格式异常，已使用默认值 80。"
+        return arr, None
+    except Exception:  # noqa: BLE001
+        return list(DEFAULT_RADAR_SCORES), "雷达分数接口异常，已使用默认值 80。"
+
+
+def radar_list_to_dict(scores: list[int]) -> dict[str, int]:
+    return {RADAR_LABELS_CN[i]: scores[i] for i in range(5)}
+
+
+def overall_from_scores(scores: list[int]) -> int:
+    if len(scores) != 5:
+        return 80
+    return int(round(sum(scores) / 5.0))
+
+
+def build_radar_figure(scores: list[int]) -> go.Figure:
+    d = radar_list_to_dict(scores)
+    values = [d[k] for k in RADAR_LABELS_CN]
+    theta = RADAR_LABELS_CN + [RADAR_LABELS_CN[0]]
     r = values + [values[0]]
     fig = go.Figure()
     fig.add_trace(
@@ -208,30 +196,180 @@ def build_radar_figure(scores: dict) -> go.Figure:
             r=r,
             theta=theta,
             fill="toself",
-            fillcolor="rgba(30, 41, 59, 0.38)",
-            line=dict(color="#1e293b", width=3.5),
-            name="匹配维度",
+            fillcolor="rgba(15, 23, 42, 0.28)",
+            line=dict(color="#0f172a", width=3),
             hovertemplate="%{theta}: %{r}<extra></extra>",
         )
     )
     fig.update_layout(
         polar=dict(
-            radialaxis=dict(visible=True, range=[0, 100], gridcolor="rgba(30,41,59,0.15)"),
-            angularaxis=dict(linecolor="rgba(30,41,59,0.2)"),
-            bgcolor="rgba(255,255,255,0.4)",
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100],
+                gridcolor="rgba(15,23,42,0.14)",
+                linecolor="rgba(15,23,42,0.18)",
+            ),
+            angularaxis=dict(linecolor="rgba(15,23,42,0.22)"),
+            bgcolor="rgba(0,0,0,0)",
         ),
         showlegend=False,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(t=48, b=48, l=48, r=48),
-        font=dict(color="#1e293b", size=13, family="sans-serif"),
-        title=dict(
-            text="简历 × JD 五维匹配雷达",
-            font=dict(size=16, color="#1e293b"),
-            x=0.5,
-        ),
+        margin=dict(t=20, b=24, l=24, r=24),
+        font=dict(color="#0f172a", size=11, family="sans-serif"),
     )
     return fig
+
+
+def render_radar_top(scores: list[int], overall: int) -> None:
+    try:
+        c1, c2 = st.columns([0.88, 1.32])
+        with c1:
+            st.metric("综合匹配", f"{overall} / 100")
+        with c2:
+            st.plotly_chart(
+                build_radar_figure(scores),
+                use_container_width=True,
+                key="radar_top",
+            )
+    except Exception as exc:  # noqa: BLE001
+        st.info(f"雷达图渲染回退：{exc}")
+        st.plotly_chart(
+            build_radar_figure(list(DEFAULT_RADAR_SCORES)),
+            use_container_width=True,
+            key="radar_top_fb",
+        )
+
+
+def prompt_section_portrait(resume: str, jd: str) -> str:
+    return f"""请用 **Markdown** 输出详尽「岗位深度画像」，聚焦：
+- KPI 体系（指标名、口径、复盘节奏）
+- **2026** 中国大陆薪酬区间（Base/奖金/总包假设写清城市与职级档位）
+- 团队与协作动态（角色分工、跨部门、压力点）
+要求：结构清晰、段落充分，避免泛泛而谈。
+
+--- 简历 ---
+{resume[:9500]}
+
+--- JD ---
+{jd[:9500]}
+"""
+
+
+def prompt_section_gap(resume: str, jd: str) -> str:
+    return f"""请用 **Markdown** 输出详尽「核心差距与行动」：
+- 对照 JD 与简历的 **详细清单**（技能/项目/行业/工具/证据）
+- 每条差距给出 **可执行** 的补强动作与优先级
+要求：清单尽量完整，可落地。
+
+--- 简历 ---
+{resume[:9500]}
+
+--- JD ---
+{jd[:9500]}
+"""
+
+
+def prompt_section_career(resume: str, jd: str) -> str:
+    return f"""请用 **Markdown** 输出详尽「专属职业进路」：
+- 2–4 条方向建议（结合简历 + 当前 JD）
+- 每条说明适配理由、市场竞争力与风险
+要求：具体、可决策。
+
+--- 简历 ---
+{resume[:9500]}
+
+--- JD ---
+{jd[:9500]}
+"""
+
+
+def prompt_interview_prediction(resume: str, jd: str) -> str:
+    return f"""请基于以下「简历」与「岗位 JD」，输出 **恰好 10 道** Masterclass 级面试题与配套解析（「少而深」优于题量堆砌），整体达到「高管终面 / Bar Raiser」难度。
+
+## 角色与标准
+- 你代表 MBB 或一线科技大厂面试体系中的 **Senior HR Director**：每题追问要穿透；**「满分范例回答」是重头戏**，要比「硬核提问」篇幅更长、更细、更可背诵改写。
+- 必须 **点名** 简历与 JD 中出现的公司、客户、品牌、平台、战役、职能（以材料中实际出现为准），禁止泛泛的「请介绍一个项目」。
+
+## 每题固定结构（10 题全部遵守，用 Markdown）
+使用二级标题：`## Qn · 简短题眼`（n=1..10），其下依次包含：
+
+**[考察维度]**：只能是以下三者之一（写明中文 + 英文）：`领导力 Leadership` / `逻辑思维 Logical Thinking` / `行业认知 Industry Knowledge`（可附 1 句为何归为此类）。
+
+**[硬核提问]**：1 段精炼但锋利的深度追问（仍须锚定材料中的具体项目/数据/组织情境）；可含「如果…你会如何…」类压力追问。**本段宜紧凑，为后面的范例回答留出篇幅。**
+
+**[满分范例回答]**（**必须写深写透**，每题至少 **400–700 字** 量级，除非简历信息严重不足）：结构化、可背诵调整的高分回答。要求：
+- 先给 **回答骨架**（3–6 个要点，编号或小标题）；
+- 正文充分展开：融合 **量化指标 / 时间线 / 角色分工 / 风险与复盘 / 取舍理由**；自然嵌入 **1 种** 分析或表达框架（如 STAR、金字塔、Issue Tree、RACI、OKR、3C、利益相关方地图等，**择一即可，勿堆砌**）；
+- 语气第一人称，专业、克制、可验证；若简历缺数据，明确写出「可补充的证据类型」与「如何在一周内补齐话术」。
+
+## 版式与覆盖
+- 题与题之间必须插入单独一行的 `---` 作为分割线。
+- 10 题须在整体上覆盖：**项目深挖、方法论、客户与媒体关系、危机与舆情、数据与效果、跨团队冲突、战略取舍、职业规划与动机** 等维度（可一题多角，但避免问法重复）。
+- **必须完整输出 Q1–Q10，缺一不可**；禁止输出到一半停止或省略某一题。
+
+--- 简历 ---
+{resume[:12000]}
+
+--- JD ---
+{jd[:12000]}
+"""
+
+
+def prompt_interview_debrief(transcript: str) -> str:
+    return f"""你将对以下「面试复盘/转写」进行专业评估。请用 Markdown 输出，包含以下小节（使用二级标题）：
+
+## 百分制评分
+给出 0-100 的整数分数，并用 2-4 句说明扣分主要原因与加分点。
+
+## 优点总结
+条列 3-8 条，具体、可引用复盘中的表述。
+
+## 详细改进建议
+条列你认为需要改进的要点（可多于 8 条），每条包含：问题表现 → 改进方向 → 可练习的具体动作。
+
+--- 面试复盘/转写 ---
+{transcript[:14000]}
+"""
+
+
+def safe_section_markdown(
+    client: OpenAI,
+    label: str,
+    user_prompt: str,
+    *,
+    max_tokens: int = 6144,
+    system: str | None = None,
+) -> str:
+    try:
+        text = chat_completion(
+            client,
+            system if system is not None else SYSTEM_HEADHUNTER,
+            user_prompt,
+            json_mode=False,
+            max_tokens=max_tokens,
+        )
+        return text if text else f"（{label}：模型返回为空，请重试。）"
+    except Exception as exc:  # noqa: BLE001
+        return f"**{label} 生成失败**\n\n`{exc}`\n\n请检查网络或稍后重试。"
+
+
+def run_full_deep_report(client: OpenAI, resume: str, jd: str) -> None:
+    """雷达 + 三段正文，全部非流式；写入 session_state。"""
+    scores, note = fetch_radar_scores_safe(client, resume, jd)
+    st.session_state.radar_scores = scores
+    st.session_state.radar_note = note
+
+    st.session_state.deep_report_portrait = safe_section_markdown(
+        client, "岗位深度画像", prompt_section_portrait(resume, jd), max_tokens=6144
+    )
+    st.session_state.deep_report_gap = safe_section_markdown(
+        client, "核心差距与行动", prompt_section_gap(resume, jd), max_tokens=6144
+    )
+    st.session_state.deep_report_career = safe_section_markdown(
+        client, "专属职业进路", prompt_section_career(resume, jd), max_tokens=6144
+    )
+    st.session_state.deep_report_ready = True
 
 
 def ensure_session_state() -> None:
@@ -239,43 +377,45 @@ def ensure_session_state() -> None:
         st.session_state.resume_text = ""
     if "jd_text" not in st.session_state:
         st.session_state.jd_text = ""
+    if "radar_scores" not in st.session_state:
+        st.session_state.radar_scores = None
+    if "radar_note" not in st.session_state:
+        st.session_state.radar_note = None
+    if "deep_report_ready" not in st.session_state:
+        st.session_state.deep_report_ready = False
+    if "deep_report_portrait" not in st.session_state:
+        st.session_state.deep_report_portrait = ""
+    if "deep_report_gap" not in st.session_state:
+        st.session_state.deep_report_gap = ""
+    if "deep_report_career" not in st.session_state:
+        st.session_state.deep_report_career = ""
+    if "interview_prediction_md" not in st.session_state:
+        st.session_state.interview_prediction_md = ""
+    if "debrief_result_md" not in st.session_state:
+        st.session_state.debrief_result_md = ""
 
 
 def main() -> None:
     st.set_page_config(
         page_title="CareerVibe",
-        page_icon="\U0001f916",
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    inject_report_css()
     ensure_session_state()
+    client = get_client()
 
-    st.markdown(
-        '<p class="hero-title">\U0001f916 CareerVibe · AI 职业战略报告</p>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<p class="hero-sub">Ultra-clean咨询报告风格 · 深度岗位画像 · 五维雷达 · 专属进路</p>',
-        unsafe_allow_html=True,
-    )
+    gen_report = False
 
     with st.sidebar:
-        st.markdown("### 材料上传")
-        st.markdown("**简历**：**PDF** 或 **Word（.docx）**。")
+        st.markdown("### 材料")
         resume_file = st.file_uploader(
-            "简历文件",
-            type=["pdf", "docx"],
-            help="上传 PDF 或 .docx",
-            key="resume_file",
+            "简历（PDF / Word）", type=["pdf", "docx"], key="resume_file"
         )
-        st.markdown("**岗位 JD**")
-        st.caption("有 PDF 时优先文件；否则使用下方文本。")
-        jd_file = st.file_uploader("JD 文件（PDF，可选）", type=["pdf"], key="jd_pdf")
+        jd_file = st.file_uploader("JD PDF（可选）", type=["pdf"], key="jd_pdf")
         jd_paste = st.text_area(
-            "或直接粘贴 JD 全文",
-            height=160,
-            placeholder="未上传 JD PDF 时，在此粘贴岗位描述…",
+            "或粘贴 JD",
+            height=120,
+            placeholder="未上传 PDF 时在此粘贴…",
             key="jd_paste",
         )
 
@@ -284,15 +424,15 @@ def main() -> None:
         else:
             try:
                 st.session_state.resume_text = extract_resume_text(resume_file)
-            except Exception as e:  # noqa: BLE001
-                st.error(f"简历解析失败：{e}")
+            except Exception as exc:  # noqa: BLE001 
+                st.error(f"简历解析失败：{exc}")
                 st.session_state.resume_text = ""
 
         if jd_file is not None:
             try:
                 st.session_state.jd_text = extract_pdf_text(jd_file)
-            except Exception as e:  # noqa: BLE001
-                st.error(f"JD 文件解析失败：{e}")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"JD 解析失败：{exc}")
                 st.session_state.jd_text = ""
         elif jd_paste.strip():
             st.session_state.jd_text = jd_paste.strip()
@@ -300,231 +440,112 @@ def main() -> None:
             st.session_state.jd_text = ""
 
         st.divider()
-        st.markdown("**解析状态**")
         r_ok = len(st.session_state.resume_text) > 50
         j_ok = len(st.session_state.jd_text) > 50
-        jd_src = (
-            "PDF"
-            if jd_file is not None
-            else ("文本" if jd_paste.strip() else "—")
-        )
-        st.write("简历：" + ("已读取" if r_ok else "— 待上传或内容过短"))
-        st.write(
-            "JD："
-            + (
-                "已读取（" + jd_src + "）"
-                if j_ok
-                else "— 请上传 PDF 或填写文本"
-            )
+        gen_report = st.button(
+            "生成深度报告",
+            type="primary",
+            disabled=not (r_ok and j_ok),
+            key="btn_deep_report",
         )
 
-    client = get_client()
+    st.title("CareerVibe")
+    st.caption("深度岗位画像 · 五维雷达 · 三 Tab 报告 · 面试工坊（非流式）")
+
     materials_ok = len(st.session_state.resume_text) > 50 and len(
         st.session_state.jd_text
     ) > 50
 
-    deep_report = st.session_state.get("deep_report")
-    if isinstance(deep_report, dict) and materials_ok:
-        st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
-        c1, c2 = st.columns([1, 1.35])
-        with c1:
-            overall = deep_report.get("overall_match_score")
-            st.metric("综合匹配指数", f"{overall} / 100" if overall is not None else "—")
-            st.caption("由模型综合五维与岗位语境估算，仅供参考。")
-        with c2:
-            rs = deep_report.get("radar_scores") or {}
-            st.plotly_chart(build_radar_figure(rs), use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-        st.markdown("<hr class='soft'/>", unsafe_allow_html=True)
+    if materials_ok and gen_report:
+        with st.spinner("正在生成深度报告（雷达 + 三段分析，请稍候）…"):
+            run_full_deep_report(
+                client,
+                st.session_state.resume_text,
+                st.session_state.jd_text,
+            )
 
-    tab_analysis, tab_interview, tab_debrief = st.tabs(
-        ["深度岗位分析", "面试通关指南", "面试复盘评分"]
+    if not materials_ok:
+        st.info("请先在侧栏上传简历并填写 JD（文本需达到一定长度）。")
+        return
+
+    if not st.session_state.deep_report_ready:
+        st.info("材料已就绪：点击侧栏「生成深度报告」，完成后将在此展示雷达与三个分析页签。")
+        return
+
+    scores = st.session_state.radar_scores
+    if not isinstance(scores, list) or len(scores) != 5:
+        scores = list(DEFAULT_RADAR_SCORES)
+    render_radar_top(scores, overall_from_scores(scores))
+    if st.session_state.radar_note:
+        st.caption(st.session_state.radar_note)
+
+    tab_a, tab_b, tab_c = st.tabs(
+        ["岗位深度画像", "核心差距与行动", "专属职业进路"]
     )
+    with tab_a:
+        st.markdown(st.session_state.deep_report_portrait or "—")
+    with tab_b:
+        st.markdown(st.session_state.deep_report_gap or "—")
+    with tab_c:
+        st.markdown(st.session_state.deep_report_career or "—")
 
-    with tab_analysis:
-        if not materials_ok:
-            st.info("请先在侧边栏上传简历并填写/上传 JD（文本需达到一定长度）。")
-        else:
-            if st.button("生成完整深度分析报告", type="primary", key="btn_deep"):
-                with st.spinner("正在生成结构化深度报告（约需 30–90 秒）…"):
-                    user_prompt = f"""你将对以下「简历」与「岗位 JD」输出 **一份 JSON**，键名必须 **完全一致**（英文 snake_case），且 **仅输出 JSON**，不要 Markdown 代码围栏。
+    st.divider()
+    st.subheader("面试工坊")
 
-## 必须包含的键
+    resume_body = st.session_state.resume_text
+    jd_body = st.session_state.jd_text
 
-1) overall_match_score：整数 0-100，表示简历与该 JD 的综合匹配度。
-
-2) radar_scores：对象，**必须且仅含**这五个键（中文），值为0-100 的整数：
-   "硬技能", "软实力", "行业相关度", "经验资历", "潜力"
-   请严格依据简历与 JD 逐项独立打分并自洽。
-
-3) job_portrait_md：字符串，使用 Markdown。**极尽详尽**，像咨询报告「岗位深度画像」章节，须覆盖：
-   - 岗位在行业内的**稀缺度**、人才供需；在**公司业务链**中的位置与核心价值。
-   - **职责深度拆解**：逐条或分块写出 JD 中的关键职责；对每一项写出**隐性能力要求**、常见 **KPI / 压力点**、踩坑点。
-   - **薪资与前景透视**：结合你对 **2024–2026** 年该行业/城市/职级的公开市场认知，给出 **Base** 与 **Bonus**（若有）的**合理预估区间**，并明确你的**地域、公司类型、职级假设**；分析 **3–5 年** 典型**职业跃迁路径**（可含横向/纵向）。
-   - 全文禁止敷衍或只列小标题不写实质段落。
-
-4) interviewer_deep_questions：字符串数组，**恰好 3 条**。从**面试官视角**，写出最可能追问的**深度**问题（需体现业务/技术/行为深挖，而非泛泛「自我介绍」）。
-
-5) gap_diagnosis_md：字符串，**纯深度叙述2–3 段**（不要用表格）。直指简历与 JD 之间的**核心断层**：能力、经历叙事、行业语境、证据链等；语气冷静、犀利、可执行。
-
-6) action_plan_md：字符串，Markdown。**行动指南**：包含   - **简历话术升级**：**1–2 条**可直接改写进简历的句子或 bullet 建议（给 before/after 或可直接粘贴版本）。
-   - **技能补强清单**：最紧迫要补的**技能 / 证书 / 项目关键词**，并说明为何与 JD 挂钩。
-
-7) career_path_suggestion：对象，键为：
-   - recommended_role：字符串，**推荐岗位名称**（可含级别，如「高级XX」「XX方向」）。
-   - rationale：字符串，**详尽**说明为何该方向**最适配当前简历**（引用简历中的可验证亮点）。
-   - market_competitiveness：字符串，分析该方向在**劳动力市场**的竞争格局、门槛与机会。
-   **重要**：该对象须**主要基于「简历」推演最适配路径，可脱离当前 JD 的单一岗位叙事**；若与当前 JD 一致可点明，但**不得**被 JD 绑架成唯一答案。
-
---- 简历 ---
-{st.session_state.resume_text[:10000]}
-
---- 岗位 JD ---
-{st.session_state.jd_text[:10000]}
-"""
-                    raw = chat_completion(
-                        client,
-                        SYSTEM_HEADHUNTER,
-                        user_prompt,
-                        json_mode=True,
-                        max_tokens=8192,
-                    )
-                    try:
-                        data = json.loads(raw)
-                    except json.JSONDecodeError:
-                        st.error("模型返回非标准 JSON，请重试或换模型。")
-                        st.code(raw[:8000])
-                    else:
-                        st.session_state["deep_report"] = data
-
-            deep_report = st.session_state.get("deep_report")
-            if isinstance(deep_report, dict):
-                t1, t2, t3 = st.tabs(
-                    ["岗位深度画像", "核心差距与行动", "\U0001f680 专属职业进路"]
-                )
-                with t1:
-                    st.markdown(
-                        '<div class="report-card">', unsafe_allow_html=True
-                    )
-                    st.markdown(deep_report.get("job_portrait_md") or "—")
-                    st.markdown("</div>", unsafe_allow_html=True)
-                    qs = deep_report.get("interviewer_deep_questions") or []
-                    if isinstance(qs, list) and qs:
-                        st.markdown("##### 面试官视角 · 三大深度追问")
-                        for i, q in enumerate(qs[:3], 1):
-                            st.markdown(f"**{i}.** {q}")
-                with t2:
-                    st.markdown(
-                        '<div class="report-card">', unsafe_allow_html=True
-                    )
-                    st.markdown("#### 核心差距诊断")
-                    st.markdown(deep_report.get("gap_diagnosis_md") or "—")
-                    st.markdown("---")
-                    st.markdown("#### 行动指南（Action Plan）")
-                    st.markdown(deep_report.get("action_plan_md") or "—")
-                    st.markdown("</div>", unsafe_allow_html=True)
-                with t3:
-                    cps = deep_report.get("career_path_suggestion") or {}
-                    if isinstance(cps, dict):
-                        role = html.escape(str(cps.get("recommended_role") or "—"))
-                        rat = html.escape(str(cps.get("rationale") or "—"))
-                        mkt = html.escape(
-                            str(cps.get("market_competitiveness") or "—")
-                        )
-                        st.markdown(
-                            f"""
-<div class="career-path-card">
-<h3>\U0001f680 最适配岗位建议</h3>
-<p><strong>推荐方向：</strong>{role}</p>
-<p><strong>推荐理由</strong></p>
-<p style="white-space:pre-wrap;">{rat}</p>
-<p><strong>市场竞争力分析</strong></p>
-<p style="white-space:pre-wrap;">{mkt}</p>
-</div>
-""",
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        st.write("—")
-
-    with tab_interview:
-        st.subheader("面试通关指南")
-        if not materials_ok:
-            st.info("请先完成侧边栏简历与 JD。")
-        else:
-            if st.button("生成 20 题面试指南", key="btn_interview"):
-                with st.spinner("正在生成高频问题与答案…"):
-                    user_prompt = f"""根据「岗位 JD」识别行业与岗位类型，生成 **恰好 20 个** 高频面试问题；须与 JD 语境一致。
-覆盖：硬技能与工具、业务场景、数据与结果、协作与沟通、领导力/影响力、压力与冲突、合规（如适用）、职业规划等。
-
-对每个 i=1..20，输出：
-**Q{{i}}** 问题
-**简历深挖**：结合简历可核验事实的追问点
-**建议回答**：详细个性化答案（第一人称，STAR 更佳）
-
-Markdown，Q1…Q20编号完整。
-
---- 简历 ---
-{st.session_state.resume_text[:10000]}
-
---- 岗位 JD ---
-{st.session_state.jd_text[:10000]}
-"""
-                    out = chat_completion(
-                        client,
-                        SYSTEM_HEADHUNTER,
-                        user_prompt,
-                        json_mode=False,
-                        max_tokens=8192,
-                    )
-                    st.session_state["interview_guide"] = out
-            guide = st.session_state.get("interview_guide")
-            if guide:
-                st.markdown('<div class="report-card">', unsafe_allow_html=True)
-                st.markdown(guide)
-                st.markdown("</div>", unsafe_allow_html=True)
-
-    with tab_debrief:
-        st.subheader("面试复盘评分")
-        notes = st.text_area(
-            "粘贴面试复盘或转写",
-            height=240,
-            placeholder="题目、回答要点、反馈、自我评估…",
-            key="debrief_notes",
+    with st.expander("『面试预测』", expanded=False):
+        st.caption(
+            "MBB / 一线科技 Bar Raiser 风格：10 道 Masterclass + 考察维度 + 深度满分范例（非流式，一键生成）。"
         )
-        if st.button("提交复盘并评分", key="btn_debrief"):
-            if len(notes.strip()) < 30:
-                st.warning("内容过短。")
+        run_pred = st.button(
+            "运行预测（10 题）",
+            key="btn_interview_predict_main",
+            type="secondary",
+        )
+        if run_pred:
+            with st.spinner("正在生成 10 题深度面试预测（每题范例较长，请耐心等待）…"):
+                st.session_state.interview_prediction_md = safe_section_markdown(
+                    client,
+                    "面试预测",
+                    prompt_interview_prediction(resume_body, jd_body),
+                    max_tokens=8192,
+                    system=SYSTEM_INTERVIEW_MASTER,
+                )
+        if st.session_state.interview_prediction_md:
+            st.markdown(st.session_state.interview_prediction_md)
+
+    with st.expander("『面试复盘』", expanded=False):
+        st.caption("粘贴面试记录或复盘文字；点击运行后一次性输出评分与改进建议。")
+        debrief_notes = st.text_area(
+            "面试转写 / 复盘笔记",
+            height=200,
+            placeholder="题目、你的回答要点、面试官反馈、自我感觉等…",
+            key="debrief_transcript_main",
+        )
+        run_debrief = st.button("运行复盘", key="btn_debrief_run_main")
+        if run_debrief:
+            if len(debrief_notes.strip()) < 30:
+                st.warning("内容过短，请补充更多细节以便评分。")
             else:
-                with st.spinner("评分中…"):
-                    user_prompt = f"""以全行业资深猎头视角评估以下面试复盘。Markdown 输出：
-
-## 百分制评分
-整数0-100，2-4 句说明加减分。
-
-## 优点总结
-3-8 条。
-
-## 详细改进建议
-条列所有改进点；每条：问题表现 → 改进方向 → 可练习动作。
-
---- 面试复盘 ---
-{notes[:14000]}
-"""
-                    out = chat_completion(
+                with st.spinner("正在评分与总结…"):
+                    st.session_state.debrief_result_md = safe_section_markdown(
                         client,
-                        SYSTEM_HEADHUNTER,
-                        user_prompt,
-                        json_mode=False,
+                        "面试复盘",
+                        prompt_interview_debrief(debrief_notes),
                         max_tokens=4096,
                     )
-                    st.session_state["debrief_result"] = out
-        debrief = st.session_state.get("debrief_result")
-        if debrief:
-            st.markdown('<div class="report-card">', unsafe_allow_html=True)
-            st.markdown(debrief)
-            st.markdown("</div>", unsafe_allow_html=True)
+        if st.session_state.debrief_result_md:
+            st.markdown(st.session_state.debrief_result_md)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        try:
+            st.error(f"应用异常：{exc}")
+            st.code(traceback.format_exc())
+        except Exception:
+            raise exc from None
